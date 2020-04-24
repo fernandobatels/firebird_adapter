@@ -1,6 +1,9 @@
 module ActiveRecord::ConnectionHandling
   def firebird_connection(config)
-    config = config.symbolize_keys.dup.reverse_merge(downcase_names: true, port: 3050, encoding: 'Windows-1252')
+    require 'active_record/extensions'
+    require 'active_record/internal_metadata_extensions'
+
+    config = config.symbolize_keys.dup.reverse_merge(downcase_names: true, port: 3050, encoding: ActiveRecord::ConnectionAdapters::FirebirdAdapter::DEFAULT_ENCODING)
 
     if config[:host]
       config[:database] = "#{config[:host]}/#{config[:port]}:#{config[:database]}"

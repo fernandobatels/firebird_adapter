@@ -1,6 +1,24 @@
 module ActiveRecord::ConnectionAdapters::Firebird::DatabaseStatements
 
+  def native_database_types
+    {
+      primary_key: 'integer not null primary key',
+      string:      { name: 'varchar', limit: 255 },
+      text:        { name: 'blob sub_type text' },
+      integer:     { name: 'integer' },
+      float:       { name: 'float' },
+      decimal:     { name: 'decimal' },
+      datetime:    { name: 'timestamp' },
+      timestamp:   { name: 'timestamp' },
+      date:        { name: 'date' },
+      binary:      { name: 'blob' },
+      boolean:     { name: 'smallint' }
+    }
+  end
+
   def execute(sql, name = nil)
+    sql = sql.encode(encoding, 'UTF-8')
+
     log(sql, name) do
       ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
         @connection.query(sql)
@@ -9,23 +27,36 @@ module ActiveRecord::ConnectionAdapters::Firebird::DatabaseStatements
   end
 
   def exec_query(sql, name = 'SQL', binds = [], prepare: false)
-    type_casted_binds = type_casted_binds(binds)
+    sql = sql.encode(encoding, 'UTF-8')
+
+    type_casted_binds = type_casted_binds(binds).map do |value|
+      value.encode(encoding) rescue value
+    end
 
     log(sql, name, binds, type_casted_binds) do
       ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
-        result = @connection.execute(sql, *type_casted_binds)
-        if result.is_a?(Fb::Cursor)
-          fields = result.fields.map(&:name)
-          rows = result.fetchall.map do |row|
-            row.map do |col|
-              col.encode('UTF-8', @connection.encoding) rescue col
+        begin
+          result = @connection.execute(sql, *type_casted_binds)
+          if result.is_a?(Fb::Cursor)
+            fields = result.fields.map(&:name)
+            rows = result.fetchall.map do |row|
+              row.map do |col|
+                col.encode('UTF-8', @connection.encoding) rescue col
+              end
             end
-          end
 
-          result.close
-          ActiveRecord::Result.new(fields, rows)
-        else
-          result
+            result.close
+            ActiveRecord::Result.new(fields, rows)
+          elsif name.ends_with?(' Destroy')
+            result
+          else
+            ActiveRecord::Result.new([], [])
+          end
+        rescue RangeError
+          ActiveRecord::Result.new([], [])
+        rescue Exception => e
+          result.close if result.is_a?(Fb::Cursor)
+          raise e.message.encode('UTF-8', @connection.encoding)
         end
       end
     end
@@ -41,6 +72,36 @@ module ActiveRecord::ConnectionAdapters::Firebird::DatabaseStatements
 
   def exec_rollback_db_transaction
     log("rollback transaction", nil) { @connection.rollback }
+  end
+
+  def create_table(table_name, **options)
+    super
+
+    if options[:sequence] != false && options[:id] != false
+      sequence_name = options[:sequence] || default_sequence_name(table_name)
+      create_sequence(sequence_name)
+    end
+  end
+
+  def drop_table(table_name, options = {})
+    if options[:sequence] != false
+      sequence_name = options[:sequence] || default_sequence_name(table_name)
+      drop_sequence(sequence_name) if sequence_exists?(sequence_name)
+    end
+
+    super
+  end
+
+  def create_sequence(sequence_name)
+    execute("CREATE SEQUENCE #{sequence_name}") rescue nil
+  end
+
+  def drop_sequence(sequence_name)
+    execute("DROP SEQUENCE #{sequence_name}") rescue nil
+  end
+
+  def sequence_exists?(sequence_name)
+    @connection.generator_names.include?(sequence_name)
   end
 
   def default_sequence_name(table_name, _column = nil)
